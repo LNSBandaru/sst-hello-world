@@ -1,0 +1,65 @@
+Best practice: one domain per stack (compute, storage, data), wired via typed props—not a monolith stack.
+DataStack.ts -> DynamoDB
+StorageStack.ts -> S3
+ComputeStack.ts -> Lambda
+
+Why this pattern:
+Separation of concerns: clear blast-radius & lifecycle per domain
+Reusability: compute stack is portable; swap Data/Storage without touching Lambda code.
+Least-priviliges IAM: attach minimal grants at the compute boundary
+Faster deploys: touch one stack -> deploy only that stack
+
+## managing the secrets in SST.Config
+
+Rather than reading Secrets Manager on every invocation, you wire the secret into the Lambda’s environment when you deploy. SST fetches/decrypts the secret once during deployment (or sst dev startup) and injects the value as an environment variable. At runtime your function just reads process.env.*, so there’s no per-invoke Secrets Manager call, but the value is still stored securely in AWS.
+
+Step-by-step Flow
+
+Create the secret
+
+Store the credential in AWS Secrets Manager (or Parameter Store SecureString).
+Example Secret Manager value:
+{ "username": "abcd", "password": "efh" }
+Note its name or ARN (e.g., countries/partner).
+Define the secret in SST
+
+In your stack code, declare the secret so SST knows to bind it. For SST v3 you can either:
+import { Secret } from "sst";
+
+const partnerSecret = new Secret(stack, "CountriesSecret", {
+  name: "countries/partner",  // optional; defaults to generated name
+});
+or, to reference an existing secret without creating it:
+import { Config } from "sst";
+
+const partnerSecret = Config.Secret.fromName(stack, "CountriesSecret", "countries/partner");
+The result is an SST Secret/Config.Secret object you can later link to functions.
+Bind the secret to the Lambda
+
+When creating the Lambda (via BaseFunction or sst.Function), add the secret to its bind list (or secrets property depending on construct). With your wrapper it might look like:
+this.countries = new BaseFunction(stack, {
+  id: "CountriesFn",
+  entry: "src/functions/countries/handler.ts",
+  env: {
+    COUNTRIES_API_URL: "https://examples.com/contries",
+  },
+  runtime: "nodejs22.x",
+  bind: [partnerSecret],
+  url: false,
+}).fn;
+SST injects environment variables named after the secret (CountriesSecret_SECRET, or a custom string if you specify one). It also leaves the secret in AWS—only the value is copied into the Lambda’s environment during deploy.
+Read the secret in your handler
+
+At runtime, just read process.env.CountriesSecret_SECRET (or the alias you chose). No GetSecretValue call needed.
+Rotate / update the secret
+
+When the credential changes, update the value in Secrets Manager. Then run sst secrets sync or redeploy (sst deploy). SST re-reads the secret and refreshes the Lambda’s environment variable.
+Because the secret stays in Secrets Manager/Parameter Store, rotation can still be automated; the Lambda picks up the new value on the next deploy/sync.
+Security/IAM
+
+The Lambda no longer needs secretsmanager:GetSecretValue permissions—just access to its environment variables. Limit secret access to your deployment role.
+The secret never enters source control; it’s retrieved securely during deploy.
+
+
+1. package.json
+
