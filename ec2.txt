@@ -1,0 +1,402 @@
+import * as aws from '@pulumi/aws';
+import * as pulumi from '@pulumi/pulumi';
+import * as tp from '@securustablets/libraries.pulumi';
+import { bool, json, num, str } from 'envalid';
+
+type ingressCIDRS = {
+  ports: { from: number; to: number };
+  cidrIp: string;
+  ipProtocol: 'tcp' | 'udp' | 'icmp' | '-1';
+  description?: string;
+};
+
+export interface Ec2InstanceEnv {
+  EC2_NAME: string;
+  EC2_AMI_ID: string;
+  VPC_ID: string;
+  EC2_INSTANCE_TYPE: string;
+  EC2_ENABLE_DETAILED_MONITORING: boolean;
+  EC2_ALLOWED_INGRESS_CIDRS: ingressCIDRS[];
+  EC2_ALLOWED_SECONDARY_INGRESS_CIDRS: ingressCIDRS[];
+  EC2_VOLUME_SIZE: number;
+  EC2_KEY_NAME: string;
+  EC2_ENABLE_EIP: boolean;
+  EC2_ENABLE_SECONDARY_ENI: boolean;
+  EC2_PRIMARY_ENI_SUBNET_TYPE: string;
+  EC2_SECONDARY_ENI_SUBNET_TYPE: string;
+}
+
+export interface Ec2InstanceArgs {
+  name?: string;
+}
+
+export class Ec2Instance extends tp.TpComponentResource<
+  Ec2InstanceArgs,
+  Ec2InstanceEnv
+> {
+  public readonly securityGroup: aws.ec2.SecurityGroup;
+  public readonly secondarySecurityGroup: aws.ec2.SecurityGroup;
+  public readonly instance: aws.ec2.Instance;
+  public readonly instanceRole: aws.iam.Role;
+  public readonly instanceProfile: aws.iam.InstanceProfile;
+  public readonly elasticIp?: aws.ec2.Eip;
+  public readonly eipAssociation?: aws.ec2.EipAssociation;
+  public readonly primaryNic?: aws.ec2.NetworkInterface;
+  public readonly secondaryNic?: aws.ec2.NetworkInterface;
+
+  constructor(
+    name: string,
+    args: Ec2InstanceArgs,
+    opts?: pulumi.ComponentResourceOptions,
+  ) {
+    super('tls-ec2-instance:EC2:Ec2InstanceComponent', name, args, opts);
+
+    // -------------------------------------------------------
+    // Environment variables
+    // -------------------------------------------------------
+    const ec2Name = this.config.lookup('EC2_NAME');
+    const amiId = this.config.lookup('EC2_AMI_ID');
+    const instanceType = this.config.lookup('EC2_INSTANCE_TYPE');
+    const enableDetailedMonitoring = this.config.lookup(
+      'EC2_ENABLE_DETAILED_MONITORING',
+    );
+
+    const vpcId = this.config.lookup('VPC_ID');
+    const inboundCidrs = this.config.lookup('EC2_ALLOWED_INGRESS_CIDRS');
+    const inboundSecondaryCidrs = this.config.lookup(
+      'EC2_ALLOWED_SECONDARY_INGRESS_CIDRS',
+    );
+    const volumeSize = this.config.lookup('EC2_VOLUME_SIZE');
+    const keyName = this.config.lookup('EC2_KEY_NAME');
+    const enableEip = this.config.lookup('EC2_ENABLE_EIP');
+    const enableSecondaryENI = this.config.lookup('EC2_ENABLE_SECONDARY_ENI');
+    const primaryEniSubnetType = this.config.lookup(
+      'EC2_PRIMARY_ENI_SUBNET_TYPE',
+    );
+    const secondaryEniSubnetType = this.config.lookup(
+      'EC2_SECONDARY_ENI_SUBNET_TYPE',
+    );
+
+    this.instanceRole = new aws.iam.Role(
+      `${ec2Name}-role`,
+      {
+        assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
+          Service: 'ec2.amazonaws.com',
+        }),
+        tags: tp.tags(),
+      },
+      { parent: this },
+    );
+
+    const rolePolicy = new aws.iam.RolePolicy(
+      `${ec2Name}-policy`,
+      {
+        role: this.instanceRole.id,
+        policy: pulumi.output({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Effect: 'Allow',
+              Action: ['ssm:*', 'ssmmessages:*', 'ec2messages:*'],
+              Resource: '*',
+            },
+            {
+              Effect: 'Allow',
+              Action: [
+                'logs:CreateLogGroup',
+                'logs:CreateLogStream',
+                'logs:PutLogEvents',
+              ],
+              Resource: '*',
+            },
+          ],
+        }),
+      },
+      { parent: this },
+    );
+
+    this.instanceProfile = new aws.iam.InstanceProfile(
+      `${ec2Name}-profile`,
+      {
+        role: this.instanceRole.name,
+        tags: tp.tags(),
+      },
+      { parent: this },
+    );
+
+    // -------------------------------------------------------
+    // SUBNET SELECTION - auto-discover if not provided
+    // -------------------------------------------------------
+    // public subnet
+    const publicSubnets = aws.ec2.getSubnetsOutput({
+      filters: [
+        {
+          name: 'vpc-id',
+          values: [vpcId],
+        },
+      ],
+      tags: { subnet_type: 'public', ...tp.tags() },
+    });
+    const publicSubnetId = publicSubnets.ids.apply((ids) => ids[0]);
+    console.log(
+      '*************************************** Public subnet id ********',
+      { publicSubnetId },
+    );
+    //Private Subnet Discover
+    const privateSubnets = aws.ec2.getSubnetsOutput({
+      filters: [
+        {
+          name: 'vpc-id',
+          values: [vpcId],
+        },
+      ],
+      tags: { subnet_type: 'private', ...tp.tags() },
+    });
+
+    const privateSubnetId = privateSubnets.ids.apply((ids) => ids[0]);
+    console.log(
+      '*************************************** Private subnet id ********',
+      { privateSubnetId },
+    );
+    // -------------------------------------------------------
+    // SECURITY GROUP
+    // -------------------------------------------------------
+    this.securityGroup = new aws.ec2.SecurityGroup(
+      `${ec2Name}-sg`,
+      {
+        vpcId: vpcId,
+        description: `Security group for EC2 instance: ${ec2Name}`,
+        tags: {
+          Name: `${ec2Name}-sg`,
+          ...tp.tags(),
+        },
+      },
+      { parent: this },
+    );
+
+    let idx = 0;
+    for (const { ports, cidrIp, ipProtocol, description } of inboundCidrs) {
+      const protocol = ipProtocol || 'tcp';
+      const sgRules = new aws.vpc.SecurityGroupIngressRule(
+        `${ec2Name}-ingress-${idx++}`,
+        {
+          securityGroupId: this.securityGroup.id,
+          ipProtocol: protocol,
+          fromPort: ports.from,
+          toPort: ports.to,
+          cidrIpv4: cidrIp,
+          description: description || '',
+        },
+      );
+    }
+
+    const sgEgress = new aws.vpc.SecurityGroupEgressRule(
+      `${ec2Name}-egress-all`,
+      {
+        securityGroupId: this.securityGroup.id,
+        ipProtocol: '-1',
+        cidrIpv4: '0.0.0.0/0',
+        description: 'Allow all outbound',
+      },
+    );
+
+    // -------------------------------------------------------
+    // PRIMARY NETWORK INTERFACE (eth0) (Public)
+    // -------------------------------------------------------
+    this.primaryNic = new aws.ec2.NetworkInterface(
+      `${ec2Name}-primary-nic`,
+      {
+        subnetId: publicSubnetId,
+        securityGroups: [this.securityGroup.id],
+        description: `${ec2Name} primary network interface`,
+        tags: tp.tags(),
+      },
+      { parent: this },
+    );
+
+    // -------------------------------------------------------
+    // SECONDARY NETWORK INTERFACE (eth1) (public)
+    // -------------------------------------------------------
+    this.secondarySecurityGroup = new aws.ec2.SecurityGroup(
+      `${ec2Name}-secondary-sg`,
+      {
+        vpcId: vpcId,
+        description: `Security group for EC2 instance: ${ec2Name}`,
+        tags: {
+          Name: `${ec2Name}-secondary-sg`,
+          ...tp.tags(),
+        },
+      },
+      { parent: this },
+    );
+
+    idx = 0;
+    for (const {
+      ports,
+      cidrIp,
+      ipProtocol,
+      description,
+    } of inboundSecondaryCidrs) {
+      const protocol = ipProtocol || 'tcp';
+      const sgRules = new aws.vpc.SecurityGroupIngressRule(
+        `${ec2Name}-secondary-ingress-${idx++}`,
+        {
+          securityGroupId: this.secondarySecurityGroup.id,
+          ipProtocol: protocol,
+          fromPort: ports.from,
+          toPort: ports.to,
+          cidrIpv4: cidrIp,
+          description: description || '',
+        },
+      );
+    }
+
+    const secSgEgress = new aws.vpc.SecurityGroupEgressRule(
+      `${ec2Name}-secondary-egress-all`,
+      {
+        securityGroupId: this.secondarySecurityGroup.id,
+        ipProtocol: '-1',
+        cidrIpv4: '0.0.0.0/0',
+        description: 'Allow all outbound',
+      },
+    );
+
+    if (enableSecondaryENI) {
+      this.secondaryNic = new aws.ec2.NetworkInterface(
+        `${ec2Name}-secondary-nic`,
+        {
+          subnetId: privateSubnetId,
+          securityGroups: [this.secondarySecurityGroup.id],
+          description: `${ec2Name} secondary network interface`,
+          tags: tp.tags(),
+        },
+        { parent: this },
+      );
+    }
+
+    // -------------------------------------------------------
+    // EC2 Instance
+    // -------------------------------------------------------
+    this.instance = new aws.ec2.Instance(
+      `${ec2Name}-ec2`,
+      {
+        ami: amiId,
+        instanceType: instanceType,
+        keyName: keyName,
+        monitoring: enableDetailedMonitoring,
+        iamInstanceProfile: this.instanceProfile,
+        networkInterfaces: [
+          {
+            deviceIndex: 0,
+            networkInterfaceId: this.primaryNic.id,
+          },
+        ],
+
+        metadataOptions: {
+          httpTokens: 'required',
+          httpEndpoint: 'enabled',
+        },
+        rootBlockDevice: {
+          encrypted: true,
+          volumeType: 'gp3',
+          volumeSize: volumeSize,
+        },
+        tags: tp.tags(),
+      },
+      { parent: this },
+    );
+
+    // Attach secondary NIC after instance created
+    if (this.secondaryNic) {
+      const nia = new aws.ec2.NetworkInterfaceAttachment(
+        `${ec2Name}-secondary-attach`,
+        {
+          deviceIndex: 1,
+          instanceId: this.instance.id,
+          networkInterfaceId: this.secondaryNic.id,
+        },
+        { parent: this },
+      );
+    }
+
+    // -------------------------------------------------------
+    // ELASTIC IP
+    // -------------------------------------------------------
+    if (enableEip) {
+      this.elasticIp = new aws.ec2.Eip(`${ec2Name}-eip`, {}, { parent: this });
+      this.eipAssociation = new aws.ec2.EipAssociation(
+        `${ec2Name}-eip-assoc`,
+        {
+          allocationId: this.elasticIp.id,
+          networkInterfaceId: this.primaryNic.id,
+        },
+        { parent: this },
+      );
+    }
+
+    // -------------------------------------------------------
+    // OUTPUTS
+    // -------------------------------------------------------
+    this.registerOutputs({
+      instanceId: this.instance.id,
+      volumeSize,
+      privateIp: this.instance.privateIp,
+      publicIp: this.instance.publicIp,
+      securityGroupId: this.securityGroup.id,
+      keyPairName: keyName,
+      roleArn: this.instanceRole.arn,
+    });
+  }
+  /* eslint-disable quote-props */
+  static envValidators(name: string): tp.Validators<Ec2InstanceEnv> {
+    return {
+      EC2_NAME: str({
+        desc: 'EC2 instance name',
+        default: 'ec2-instance',
+      }),
+      EC2_AMI_ID: str({
+        desc: 'AMI ID for FortiGate Image to Create EC2 Instance',
+      }),
+      VPC_ID: str({
+        desc: 'VPC ID to Connect EC2 Instance',
+      }),
+      EC2_INSTANCE_TYPE: str({
+        desc: 'EC2 instance type to create the EC2 instance, t3.micro is freetrail instance type',
+        default: 't3.medium',
+      }),
+      EC2_ENABLE_DETAILED_MONITORING: bool({
+        desc: 'Enable detailed monitoring for the EC2 instance',
+        default: false,
+      }),
+      EC2_ALLOWED_INGRESS_CIDRS: json({
+        desc: 'EC2 instance inbound IP address and ports, usually refers to the IP addesses and ports',
+      }),
+      EC2_ALLOWED_SECONDARY_INGRESS_CIDRS: json({
+        desc: 'EC2 instance secondarySG inbound IP address and ports, usually refers to the IP addesses and ports',
+      }),
+      EC2_VOLUME_SIZE: num({
+        desc: 'Ec2 instance root volume is the primary storage volume that contains the operating system',
+        default: 20,
+      }),
+      EC2_KEY_NAME: str({
+        desc: 'Ec2 KeyName refers to the name of SSH key pair that you associate with an Ec2 instance at launch',
+      }),
+      EC2_ENABLE_EIP: bool({
+        desc: 'Enable/disable the Elastic IP address for this Ec2 instance',
+        default: false,
+      }),
+      EC2_ENABLE_SECONDARY_ENI: bool({
+        desc: 'Enable/disable the second ENI for this EC2 instance',
+        default: false,
+      }),
+      EC2_PRIMARY_ENI_SUBNET_TYPE: str({
+        desc: 'EC2 instance network interface primary interface subnet type',
+        default: 'public',
+      }),
+      EC2_SECONDARY_ENI_SUBNET_TYPE: str({
+        desc: 'EC2 instance network interface secondary interface subnet type',
+        default: 'private',
+      }),
+    };
+  }
+}
