@@ -420,3 +420,41 @@ if (inboundSecondaryCidrs) {
 
 
 The subnet type configuration already exists for automatic discovery. The EC2_PUBLIC_SUBNET_ID and EC2_PRIVATE_SUBNET_ID options are kept intentionally to allow users to explicitly specify a subnet when required. If these are not provided, the code falls back to selecting a subnet based on the configured subnet type. This keeps the component flexible while still supporting the standard subnet-type behavior.
+
+
+
+---------------------------------------------------------------------------------------
+
+Elastic IP Configuration
+
+EC2_ENABLE_EIP
+
+Enables or disables the creation of an Elastic IP (EIP) for the EC2 instance.
+
+Important Notes
+
+The Elastic IP is only attached to the primary network interface (eth0).
+
+The primary ENI must be placed in a public subnet for the Elastic IP to function correctly.
+
+The secondary ENI is expected to be in a private subnet and is intended for internal VPC communication.
+
+Therefore, Elastic IP is not supported for the secondary ENI.
+
+Example
+
+EC2_ENABLE_EIP=true
+EC2_PRIMARY_ENI_SUBNET_TYPE=public
+EC2_SECONDARY_ENI_SUBNET_TYPE=private
+
+Architecture Behavior
+
+Primary ENI (eth0)
+  • Public Subnet
+  • Internet access
+  • Elastic IP attached
+
+Secondary ENI (eth1)
+  • Private Subnet
+  • Internal VPC communication
+  • No Elastic IP
