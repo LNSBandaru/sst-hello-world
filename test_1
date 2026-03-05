@@ -1,3 +1,27 @@
+input:
+  backend: envalid
+  require:
+    - module: ./packages/iac/src/environment
+      export: cliValidators
+    - module: ./packages/iac/src/environment
+      export: validators
+
+generate:
+  header:
+    name: Configuration
+    description: |
+      This project is configured using environment variables.
+
+      Configuration loading using [dotenv](https://github.com/motdotla/dotenv) is supported.
+
+      You can create a `.env` file in the root of the repository to store environment variables locally.
+
+      Example:
+
+      ```
+      cp example.env .env
+      ```
+
       Then update the values according to your AWS environment.
 
   subheaders:
