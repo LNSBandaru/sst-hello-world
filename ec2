@@ -416,3 +416,7 @@ if (inboundSecondaryCidrs) {
     };
   }
 }
+
+
+
+The subnet type configuration already exists for automatic discovery. The EC2_PUBLIC_SUBNET_ID and EC2_PRIVATE_SUBNET_ID options are kept intentionally to allow users to explicitly specify a subnet when required. If these are not provided, the code falls back to selecting a subnet based on the configured subnet type. This keeps the component flexible while still supporting the standard subnet-type behavior.
