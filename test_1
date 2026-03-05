@@ -1,0 +1,21 @@
+      Then update the values according to your AWS environment.
+
+  subheaders:
+
+    - name: General Configuration
+      regex: '^(EC2_NAME|EC2_AMI_ID|VPC_ID|EC2_INSTANCE_TYPE|EC2_KEY_NAME|EC2_VOLUME_SIZE)$'
+
+    - name: Monitoring Configuration
+      regex: '^EC2_ENABLE_DETAILED_MONITORING$'
+
+    - name: Primary Network Interface Configuration
+      regex: '^(EC2_PRIMARY_ENI_SUBNET_TYPE|EC2_ALLOWED_INGRESS_CIDRS|EC2_PUBLIC_SUBNET_ID)$'
+
+    - name: Secondary Network Interface Configuration
+      regex: '^(EC2_ENABLE_SECONDARY_ENI|EC2_SECONDARY_ENI_SUBNET_TYPE|EC2_ALLOWED_SECONDARY_INGRESS_CIDRS|EC2_PRIVATE_SUBNET_ID)$'
+
+    - name: Elastic IP Configuration
+      regex: '^EC2_ENABLE_EIP$'
+
+output:
+  file: README.md
