@@ -145,7 +145,7 @@ export class Ec2Instance extends tp.TpComponentResource<
       });
     }
     //Private Subnet Discover
-    if (privateSubnetId) {
+    if (!privateSubnetId) {
       const privateNetwork = tp.Network.getPrivateNetwork();
       privateSubnetId = privateNetwork.getSubnetIds()?.apply((ids) => {
         if (!ids || ids.length === 0) {
@@ -213,7 +213,7 @@ export class Ec2Instance extends tp.TpComponentResource<
     // -------------------------------------------------------
     // SECONDARY NETWORK INTERFACE (eth1) (public)
     // -------------------------------------------------------
-    if (inboundSecondaryCidrs) {
+    if (enableSecondaryENI) {
       this.secondarySecurityGroup = new aws.ec2.SecurityGroup(
         `${ec2Name}-secondary-sg`,
         {
@@ -227,6 +227,7 @@ export class Ec2Instance extends tp.TpComponentResource<
         { parent: this },
       );
 
+if (inboundSecondaryCidrs) {
       idx = 0;
       for (const {
         ports,
@@ -247,6 +248,7 @@ export class Ec2Instance extends tp.TpComponentResource<
           },
         );
       }
+      }
       const secSgEgress = new aws.vpc.SecurityGroupEgressRule(
         `${ec2Name}-secondary-egress-all`,
         {
@@ -258,7 +260,7 @@ export class Ec2Instance extends tp.TpComponentResource<
       );
     }
 
-    if (enableSecondaryENI === true) {
+    if (enableSecondaryENI && this.secondarySecurityGroup) {
       this.secondaryNic = new aws.ec2.NetworkInterface(
         `${ec2Name}-secondary-nic`,
         {
